@@ -1,16 +1,18 @@
 # Secret Santa Telegram bot
 
-A Telegram bot that runs Secret Santa in a group chat. People register in the group, an admin
-draws names, and the bot privately tells each person who they're buying a gift for.
+A Telegram bot that runs Secret Santa in a group chat. An admin starts a round, people join in
+the group, the organiser draws names, and the bot privately tells each person who they're buying
+a gift for.
 
 ## How it works
 
 1. Add the bot to your group.
-2. Everyone opens a private chat with the bot and presses **Start**. Telegram only lets bots
-   message people who have done this.
-3. Everyone sends `/register` in the group. The bot checks it can message them privately and
-   tells them if they still need to press Start.
-4. A group admin sends `/draw`. Each participant gets a private message with their match.
+2. A group admin sends `/start` in the group. They become the organiser for this round.
+3. Everyone taps the **Join Secret Santa** button under the bot's message. It opens a private
+   chat with the bot, and pressing **Start** there joins them. Telegram only lets bots message
+   people who have started a chat with them, so this one tap covers both.
+   People who have already chatted with the bot can just send `/join` in the group.
+4. The organiser sends `/draw`. Each participant gets a private message with their match.
 
 Everyone is linked into one big circle, so nobody gets themselves and you never get two people
 who just have each other.
@@ -19,11 +21,13 @@ who just have each other.
 
 | Command | Where | Description |
 | --- | --- | --- |
-| `/register` (`/join`) | group | Join this group's Secret Santa |
-| `/unregister` (`/leave`) | group | Leave (only before the draw) |
+| `/start` | group, admins | Start a Secret Santa; you become its organiser |
+| `/start` | private chat | Sent by the Join button; joins you to that group's Secret Santa |
+| `/join` | group | Join this group's Secret Santa |
+| `/leave` | group | Leave (only before the draw) |
 | `/list` | group | Show who has registered |
-| `/draw` | group, admins | Draw names and DM everyone their match |
-| `/reset` | group, admins | Clear the round and start over |
+| `/draw` | group, organiser | Draw names and DM everyone their match. The organiser must still be an admin. |
+| `/reset` | group, admins | Cancel the round so a new one can be started |
 | `/mysanta` | anywhere | Get your match sent to you privately again |
 | `/help` | anywhere | Show the commands |
 

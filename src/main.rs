@@ -5,33 +5,39 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
-    types::{Me, ParseMode},
+    types::{InlineKeyboardButton, InlineKeyboardMarkup, Me, ParseMode, User},
     utils::{command::BotCommands, html},
 };
+use url::Url;
 
-use store::{Participant, Store};
+use store::{Game, Participant, Store};
 
 /// Fewer than this and everyone can work out who their Santa is.
 const MIN_PARTICIPANTS: usize = 3;
+
+const NOT_STARTED: &str = "No Secret Santa is running in this group yet. A group admin can /start one.";
+
+/// The join button opens a private chat with the bot via `t.me/<bot>?start=join_<chat id>`.
+/// Pressing Start there sends `/start join_<chat id>`, which both lets the bot message the
+/// person and joins them up, so nobody has to say hi to the bot separately.
+const JOIN_PAYLOAD_PREFIX: &str = "join_";
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "🎅 Secret Santa bot commands:")]
 enum Command {
     /// Show this help.
     Help,
-    /// Start a private chat with the bot (needed before registering).
-    Start,
+    /// Start a Secret Santa in this group (admins only). You'll organise it and draw names.
+    Start(String),
     /// Join this group's Secret Santa.
-    #[command(alias = "join")]
-    Register,
+    Join,
     /// Leave this group's Secret Santa.
-    #[command(alias = "leave")]
-    Unregister,
+    Leave,
     /// Show who has registered.
     List,
-    /// Draw names and DM everyone their match (admins only).
+    /// Draw names and DM everyone their match (organiser only).
     Draw,
-    /// Clear registrations and matches to start over (admins only).
+    /// Cancel this group's Secret Santa so a new one can be started (admins only).
     Reset,
     /// Get your match sent to you again in a private message.
     MySanta,
@@ -64,68 +70,136 @@ async fn handle_command(bot: Bot, msg: Message, me: Me, cmd: Command, store: Arc
     let is_group = msg.chat.is_group() || msg.chat.is_supergroup();
     match cmd {
         Command::Help => reply(&bot, &msg, &Command::descriptions().to_string()).await,
-        Command::Start if !is_group => reply(&bot, &msg, &welcome_text()).await,
-        Command::Start => reply(&bot, &msg, &Command::descriptions().to_string()).await,
+        Command::Start(payload) if !is_group => private_start(&bot, &msg, &store, &payload).await,
         Command::MySanta => my_santa(&bot, &msg, &store).await,
         _ if !is_group => reply(&bot, &msg, "This command only works in a group chat.").await,
-        Command::Register => register(&bot, &msg, &me, &store).await,
-        Command::Unregister => unregister(&bot, &msg, &store).await,
+        Command::Start(_) => start(&bot, &msg, &me, &store).await,
+        Command::Join => join(&bot, &msg, &me, &store).await,
+        Command::Leave => leave(&bot, &msg, &store).await,
         Command::List => list(&bot, &msg, &store).await,
         Command::Draw => draw(&bot, &msg, &store).await,
         Command::Reset => reset(&bot, &msg, &store).await,
     }
 }
 
-async fn register(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResult<()> {
+async fn start(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResult<()> {
     let Some(user) = &msg.from else { return Ok(()) };
-    let participant = Participant::from_user(user);
-
-    let precheck = store.read(msg.chat.id, |game| match game {
-        Some(game) if game.is_drawn() => Some("Names have already been drawn for this round."),
-        Some(game) if game.is_registered(user.id) => Some("You're already registered! 🎄"),
-        _ => None,
-    });
-    if let Some(text) = precheck {
-        return reply(bot, msg, text).await;
+    if !is_admin(bot, msg).await? {
+        return reply(bot, msg, "Only group admins can start a Secret Santa.").await;
     }
 
-    // Bots can only message people who have opened a private chat with them, so make sure
-    // we can reach this person now rather than finding out when names are drawn.
-    let title = group_title(msg);
-    let confirmation = format!(
-        "👋 You're in the Secret Santa for <b>{}</b>! I'll send your match here once names are drawn.",
-        html::escape(&title)
-    );
-    if bot.send_message(user.id, confirmation).parse_mode(ParseMode::Html).await.is_err() {
-        let text = format!(
-            "{}, I can't message you privately yet. Open {} and press <b>Start</b>, then send /register here again.",
-            participant.display(),
-            html::escape(&format!("https://t.me/{}", me.username()))
-        );
-        return reply(bot, msg, &text).await;
-    }
-
-    let result = store.update(msg.chat.id, |game| {
-        game.title = title;
-        if game.is_drawn() {
-            Err("Names have already been drawn for this round.")
-        } else if game.is_registered(user.id) {
-            Err("You're already registered! 🎄")
-        } else {
-            game.participants.push(participant.clone());
-            Ok(game.participants.len())
+    let organizer = Participant::from_user(user);
+    let game = Game {
+        title: group_title(msg),
+        organizer: organizer.clone(),
+        participants: Vec::new(),
+        assignments: None,
+    };
+    match store.start(msg.chat.id, game) {
+        Ok(()) => {
+            let text = format!(
+                "🎅 {name} started a Secret Santa! Tap the button below to join. When everyone's in, {name} will /draw names.",
+                name = organizer.display()
+            );
+            reply_with_join_button(bot, msg, me, &text).await
         }
-    });
-    match result {
-        Ok(count) => {
-            let text = format!("🎄 {} joined the Secret Santa! ({count} registered)", participant.display());
+        Err(existing) => {
+            let text = format!(
+                "A Secret Santa is already running here, organised by {}. An admin can /reset it to start over.",
+                existing.display()
+            );
             reply(bot, msg, &text).await
         }
-        Err(text) => reply(bot, msg, text).await,
     }
 }
 
-async fn unregister(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
+/// `/start` in a private chat: either someone tapped a group's join button, or they're just
+/// saying hi.
+async fn private_start(bot: &Bot, msg: &Message, store: &Store, payload: &str) -> ResponseResult<()> {
+    let Some(user) = &msg.from else { return Ok(()) };
+    let Some(chat) = payload.strip_prefix(JOIN_PAYLOAD_PREFIX).and_then(|id| id.parse().ok()).map(ChatId) else {
+        return reply(bot, msg, &welcome_text()).await;
+    };
+
+    // Join links can be forwarded, so only let members of the group into its Secret Santa.
+    let is_member = bot.get_chat_member(chat, user.id).await.is_ok_and(|m| m.kind.is_present());
+    if !is_member {
+        return reply(bot, msg, "You need to be a member of that group to join its Secret Santa.").await;
+    }
+
+    match add_participant(bot, store, chat, user).await? {
+        Ok(title) => reply(bot, msg, &joined_text(&title)).await,
+        Err(reason) => reply(bot, msg, reason).await,
+    }
+}
+
+async fn join(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResult<()> {
+    let Some(user) = &msg.from else { return Ok(()) };
+    if let Some(reason) = store.read(msg.chat.id, |game| join_blocker(game, user.id)) {
+        return reply(bot, msg, reason).await;
+    }
+
+    // Bots can only message people who have opened a private chat with them. If we can't,
+    // send them through the join button instead, which opens that chat and joins in one go.
+    let can_message = bot
+        .send_message(user.id, joined_text(&group_title(msg)))
+        .parse_mode(ParseMode::Html)
+        .await
+        .is_ok();
+    if !can_message {
+        let text = format!(
+            "{}, tap the button below and press <b>Start</b> to join. That lets me send you your match privately.",
+            Participant::from_user(user).display()
+        );
+        return reply_with_join_button(bot, msg, me, &text).await;
+    }
+
+    if let Err(reason) = add_participant(bot, store, msg.chat.id, user).await? {
+        reply(bot, msg, reason).await?;
+    }
+    Ok(())
+}
+
+/// Why `user` can't join `game` right now, if anything.
+fn join_blocker(game: Option<&Game>, user: UserId) -> Option<&'static str> {
+    match game {
+        None => Some(NOT_STARTED),
+        Some(game) if game.is_drawn() => Some("Names have already been drawn for this round."),
+        Some(game) if game.is_registered(user) => Some("You're already registered! 🎄"),
+        Some(_) => None,
+    }
+}
+
+/// Adds `user` to the Secret Santa in `chat` and announces it there. Returns the group's
+/// title, or why they couldn't join.
+async fn add_participant(
+    bot: &Bot,
+    store: &Store,
+    chat: ChatId,
+    user: &User,
+) -> ResponseResult<Result<String, &'static str>> {
+    let participant = Participant::from_user(user);
+    let result = store
+        .update(chat, |game| match join_blocker(Some(game), user.id) {
+            Some(reason) => Err(reason),
+            None => {
+                game.participants.push(participant.clone());
+                Ok((game.title.clone(), game.participants.len()))
+            }
+        })
+        .unwrap_or(Err(NOT_STARTED));
+
+    match result {
+        Ok((title, count)) => {
+            let text = format!("🎄 {} joined the Secret Santa! ({count} registered)", participant.display());
+            send(bot, chat, &text).await?;
+            Ok(Ok(title))
+        }
+        Err(reason) => Ok(Err(reason)),
+    }
+}
+
+async fn leave(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let Some(user) = &msg.from else { return Ok(()) };
     let result = store.update(msg.chat.id, |game| {
         if game.is_drawn() {
@@ -138,7 +212,7 @@ async fn unregister(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<(
         }
         Ok(game.participants.len())
     });
-    match result {
+    match result.unwrap_or(Err(NOT_STARTED)) {
         Ok(count) => {
             let name = Participant::from_user(user).display();
             reply(bot, msg, &format!("👋 {name} left the Secret Santa. ({count} registered)")).await
@@ -149,27 +223,43 @@ async fn unregister(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<(
 
 async fn list(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let text = store.read(msg.chat.id, |game| match game {
-        Some(game) if !game.participants.is_empty() => {
+        None => NOT_STARTED.to_string(),
+        Some(game) if game.participants.is_empty() => format!(
+            "🎅 Secret Santa organised by {}. Nobody has joined yet — send /join to take part!",
+            game.organizer.display()
+        ),
+        Some(game) => {
             let names: Vec<String> = game.participants.iter().map(|p| format!("• {}", p.display())).collect();
             let status = if game.is_drawn() {
                 "Names have been drawn! 🎁"
             } else {
-                "Registration is open — use /register to join."
+                "Registration is open — use /join to join in."
             };
             format!(
-                "🎅 <b>Secret Santa participants ({})</b>\n{}\n\n{status}",
+                "🎅 <b>Secret Santa participants ({})</b>\nOrganised by {}\n\n{}\n\n{status}",
                 names.len(),
+                game.organizer.display(),
                 names.join("\n")
             )
         }
-        _ => "Nobody has registered yet. Use /register to join!".to_string(),
     });
     reply(bot, msg, &text).await
 }
 
 async fn draw(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
+    let Some(user) = &msg.from else { return Ok(()) };
+    let Some(organizer) = store.read(msg.chat.id, |game| game.map(|g| g.organizer.clone())) else {
+        return reply(bot, msg, NOT_STARTED).await;
+    };
+    if organizer.id != user.id {
+        let text = format!(
+            "Only {}, who started this Secret Santa, can draw names.",
+            organizer.display()
+        );
+        return reply(bot, msg, &text).await;
+    }
     if !is_admin(bot, msg).await? {
-        return reply(bot, msg, "Only group admins can draw names.").await;
+        return reply(bot, msg, "You need to be a group admin to draw names.").await;
     }
 
     let result = store.update(msg.chat.id, |game| {
@@ -186,7 +276,7 @@ async fn draw(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
         game.assignments = Some(pairs.iter().map(|(giver, receiver)| (giver.id, receiver.id)).collect());
         Ok((game.title.clone(), pairs))
     });
-    let (title, pairs) = match result {
+    let (title, pairs) = match result.unwrap_or_else(|| Err(NOT_STARTED.to_string())) {
         Ok(drawn) => drawn,
         Err(text) => return reply(bot, msg, &text).await,
     };
@@ -217,7 +307,7 @@ async fn reset(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
         return reply(bot, msg, "Only group admins can reset the Secret Santa.").await;
     }
     store.remove(msg.chat.id);
-    reply(bot, msg, "🔄 Secret Santa has been reset. Use /register to join the new round!").await
+    reply(bot, msg, "🔄 Secret Santa has been reset. A group admin can /start a new one.").await
 }
 
 async fn my_santa(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
@@ -225,7 +315,7 @@ async fn my_santa(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()>
     let matches = store.matches_for(user.id);
 
     let text = if matches.is_empty() {
-        "You don't have a Secret Santa match yet. Register in your group with /register and wait for the draw!"
+        "You don't have a Secret Santa match yet. Send /join in your group and wait for the draw!"
             .to_string()
     } else {
         matches
@@ -247,6 +337,13 @@ async fn my_santa(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()>
     }
 }
 
+fn joined_text(group_title: &str) -> String {
+    format!(
+        "👋 You're in the Secret Santa for <b>{}</b>! I'll send your match here once names are drawn.",
+        html::escape(group_title)
+    )
+}
+
 fn match_text(group_title: &str, receiver: &Participant) -> String {
     format!(
         "🎅 <b>Secret Santa — {}</b>\n\nYou're buying a gift for: <b>{}</b> 🎁\n\nShh, keep it a secret! 🤫",
@@ -258,8 +355,8 @@ fn match_text(group_title: &str, receiver: &Participant) -> String {
 fn welcome_text() -> String {
     format!(
         "🎅 Ho ho ho! I organise Secret Santa in group chats.\n\n\
-         Now that we've said hi, I can message you privately. Go back to your group and send /register to join. \
-         When an admin sends /draw, I'll tell you here who you're buying a gift for.\n\n{}",
+         To take part, tap the join button in your group or send /join there. \
+         When the organiser draws names, I'll tell you here who you're buying a gift for.\n\n{}",
         Command::descriptions()
     )
 }
@@ -275,6 +372,34 @@ async fn is_admin(bot: &Bot, msg: &Message) -> ResponseResult<bool> {
 }
 
 async fn reply(bot: &Bot, msg: &Message, text: &str) -> ResponseResult<()> {
-    bot.send_message(msg.chat.id, text).parse_mode(ParseMode::Html).await?;
+    send(bot, msg.chat.id, text).await
+}
+
+/// Replies with a button that opens a private chat with the bot and joins this group's
+/// Secret Santa (see [`JOIN_PAYLOAD_PREFIX`]).
+async fn reply_with_join_button(bot: &Bot, msg: &Message, me: &Me, text: &str) -> ResponseResult<()> {
+    let link = format!("https://t.me/{}?start={JOIN_PAYLOAD_PREFIX}{}", me.username(), msg.chat.id);
+    let url = Url::parse(&link).expect("bot usernames and chat ids are valid in a URL");
+    let button = InlineKeyboardMarkup::new([[InlineKeyboardButton::url("🎄 Join Secret Santa", url)]]);
+    bot.send_message(msg.chat.id, text).parse_mode(ParseMode::Html).reply_markup(button).await?;
     Ok(())
+}
+
+async fn send(bot: &Bot, chat: ChatId, text: &str) -> ResponseResult<()> {
+    bot.send_message(chat, text).parse_mode(ParseMode::Html).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_parses_with_and_without_a_join_payload() {
+        let plain = Command::parse("/start", "santa_bot");
+        assert!(matches!(plain, Ok(Command::Start(p)) if p.is_empty()));
+
+        let join = Command::parse("/start join_-1001234567890", "santa_bot");
+        assert!(matches!(join, Ok(Command::Start(p)) if p == "join_-1001234567890"));
+    }
 }

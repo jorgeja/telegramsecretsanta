@@ -37,9 +37,11 @@ impl Participant {
 }
 
 /// A Secret Santa round in one group chat.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Game {
     pub title: String,
+    /// The admin who ran /start; only they can draw names.
+    pub organizer: Participant,
     pub participants: Vec<Participant>,
     /// `(giver, receiver)` pairs, set once names have been drawn.
     pub assignments: Option<Vec<(UserId, UserId)>>,
@@ -83,12 +85,25 @@ impl Store {
         f(games.get(&chat.0))
     }
 
-    /// Runs `f` on the game for `chat` (creating it if needed) and saves the result.
-    pub fn update<R>(&self, chat: ChatId, f: impl FnOnce(&mut Game) -> R) -> R {
+    /// Runs `f` on the game for `chat` and saves the result, or returns `None` if no game
+    /// has been started there.
+    pub fn update<R>(&self, chat: ChatId, f: impl FnOnce(&mut Game) -> R) -> Option<R> {
         let mut games = self.games.lock().unwrap();
-        let result = f(games.entry(chat.0).or_default());
+        let result = f(games.get_mut(&chat.0)?);
         self.save(&games);
-        result
+        Some(result)
+    }
+
+    /// Starts `game` in `chat`, unless one is already running there, in which case that
+    /// game's organiser is returned.
+    pub fn start(&self, chat: ChatId, game: Game) -> Result<(), Participant> {
+        let mut games = self.games.lock().unwrap();
+        if let Some(existing) = games.get(&chat.0) {
+            return Err(existing.organizer.clone());
+        }
+        games.insert(chat.0, game);
+        self.save(&games);
+        Ok(())
     }
 
     pub fn remove(&self, chat: ChatId) {
