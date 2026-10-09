@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
-    types::{InlineKeyboardButton, InlineKeyboardMarkup, Me, ParseMode, User},
+    types::{ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Me, ParseMode, User},
     utils::{command::BotCommands, html},
 };
 use url::Url;
@@ -37,7 +37,7 @@ enum Command {
     List,
     /// Draw names and DM everyone their match (organiser only).
     Draw,
-    /// Cancel this group's Secret Santa so a new one can be started (admins only).
+    /// Cancel this group's Secret Santa so a new one can be started (organiser only).
     Reset,
     /// Get your match sent to you again in a private message.
     MySanta,
@@ -56,7 +56,9 @@ async fn main() {
         log::warn!("Couldn't register the command menu: {e}");
     }
 
-    let handler = Update::filter_message().filter_command::<Command>().endpoint(handle_command);
+    let handler = dptree::entry()
+        .branch(Update::filter_message().filter_command::<Command>().endpoint(handle_command))
+        .branch(Update::filter_my_chat_member().endpoint(bot_membership_changed));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![store])
@@ -115,7 +117,7 @@ async fn start(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResu
         }
         Err(existing) => {
             let text = format!(
-                "A Secret Santa is already running here.{} An admin can /reset it to start over.",
+                "A Secret Santa is already running here.{} The organiser can /reset it to start over.",
                 existing.map(|o| format!(" It's organised by {}.", o.display())).unwrap_or_default()
             );
             reply(bot, msg, &text).await
@@ -132,8 +134,7 @@ async fn private_start(bot: &Bot, msg: &Message, store: &Store, payload: &str) -
     };
 
     // Join links can be forwarded, so only let members of the group into its Secret Santa.
-    let is_member = bot.get_chat_member(chat, user.id).await.is_ok_and(|m| m.kind.is_present());
-    if !is_member {
+    if !is_member(bot, chat, user.id).await {
         return reply(bot, msg, "You need to be a member of that group to join its Secret Santa.").await;
     }
 
@@ -213,7 +214,7 @@ async fn leave(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let Some(user) = &msg.from else { return Ok(()) };
     let result = store.update(msg.chat.id, |game| {
         if game.is_drawn() {
-            return Err("Names have already been drawn, so you can't leave this round. An admin can /reset it.");
+            return Err("Names have already been drawn, so you can't leave this round. The organiser can /reset it.");
         }
         let before = game.participants.len();
         game.participants.retain(|p| p.id != user.id);
@@ -322,11 +323,35 @@ async fn draw(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
 }
 
 async fn reset(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
-    if !is_admin(bot, msg).await? {
-        return reply(bot, msg, "Only group admins can reset the Secret Santa.").await;
+    let Some(user) = &msg.from else { return Ok(()) };
+    let Some(organizer) = store.read(msg.chat.id, |game| game.map(|g| g.organizer.clone())) else {
+        return reply(bot, msg, NOT_STARTED).await;
+    };
+    let is_organizer = organizer.as_ref().is_some_and(|o| o.id == user.id);
+    if !is_organizer {
+        if let Some(organizer) = &organizer
+            && is_member(bot, msg.chat.id, organizer.id).await
+        {
+            let text = format!("Only {}, who started this Secret Santa, can reset it.", organizer.display());
+            return reply(bot, msg, &text).await;
+        }
+        // The organiser has left the group, or the round was saved before organisers existed,
+        // so any admin can reset it rather than leave it stuck.
+        if !is_admin(bot, msg).await? {
+            return reply(bot, msg, "Only group admins can reset the Secret Santa.").await;
+        }
     }
     store.remove(msg.chat.id);
     reply(bot, msg, "🔄 Secret Santa has been reset. A group admin can /start a new one.").await
+}
+
+/// Forgets a group's Secret Santa when the bot is removed from it.
+async fn bot_membership_changed(update: ChatMemberUpdated, store: Arc<Store>) -> ResponseResult<()> {
+    if !update.new_chat_member.kind.is_present() && store.read(update.chat.id, |game| game.is_some()) {
+        log::info!("Removed from chat {}, resetting its Secret Santa", update.chat.id);
+        store.remove(update.chat.id);
+    }
+    Ok(())
 }
 
 async fn my_santa(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
@@ -382,6 +407,10 @@ fn welcome_text() -> String {
 
 fn group_title(msg: &Message) -> String {
     msg.chat.title().unwrap_or("your group").to_string()
+}
+
+async fn is_member(bot: &Bot, chat: ChatId, user: UserId) -> bool {
+    bot.get_chat_member(chat, user).await.is_ok_and(|m| m.kind.is_present())
 }
 
 async fn is_admin(bot: &Bot, msg: &Message) -> ResponseResult<bool> {

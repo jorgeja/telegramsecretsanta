@@ -28,9 +28,11 @@ who just have each other.
 | `/leave` | group | Leave (only before the draw) |
 | `/list` | group | Show who has registered |
 | `/draw` | group, organiser | Draw names and DM everyone their match. The organiser must still be an admin. |
-| `/reset` | group, admins | Cancel the round so a new one can be started |
+| `/reset` | group, organiser | Cancel the round so a new one can be started. Any admin can do this if the organiser has left the group. |
 | `/mysanta` | anywhere | Get your match sent to you privately again |
 | `/help` | anywhere | Show the commands |
+
+Removing the bot from a group deletes that group's Secret Santa, including any matches.
 
 ## Setup
 
