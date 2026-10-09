@@ -29,7 +29,7 @@ who just have each other.
 | `/list` | group | Show who has registered |
 | `/draw` | group, organiser | Draw names and DM everyone their match. The organiser must still be an admin. |
 | `/reset` | group, organiser | Cancel the round so a new one can be started. Any admin can do this if the organiser has left the group. |
-| `/mysanta` | anywhere | Get your match sent to you privately again |
+| `/mysanta` | anywhere | Get your match sent to you privately again. In a group you get that group's match; in a private chat, all of them. |
 | `/help` | anywhere | Show the commands |
 
 Removing the bot from a group deletes that group's Secret Santa, including any matches.

@@ -61,6 +61,12 @@ impl Game {
     pub fn participant(&self, user: UserId) -> Option<&Participant> {
         self.participants.iter().find(|p| p.id == user)
     }
+
+    /// Who `giver` is buying a gift for, once names have been drawn.
+    pub fn match_for(&self, giver: UserId) -> Option<&Participant> {
+        let (_, receiver) = self.assignments.as_ref()?.iter().find(|(g, _)| *g == giver)?;
+        self.participant(*receiver)
+    }
 }
 
 /// All games, keyed by group chat id, persisted to a JSON file after every change so
@@ -119,10 +125,7 @@ impl Store {
         let games = self.games.lock().unwrap();
         games
             .values()
-            .filter_map(|game| {
-                let (_, receiver) = game.assignments.as_ref()?.iter().find(|(giver, _)| *giver == user)?;
-                Some((game.title.clone(), game.participant(*receiver)?.clone()))
-            })
+            .filter_map(|game| Some((game.title.clone(), game.match_for(user)?.clone())))
             .collect()
     }
 
@@ -157,5 +160,50 @@ mod tests {
         let game = &games[&-1001234567890];
         assert!(game.organizer.is_none());
         assert!(game.is_registered(UserId(42)));
+    }
+
+    #[test]
+    fn removing_a_round_forgets_its_matches() {
+        let path = std::env::temp_dir().join(format!("santa_test_{}.json", std::process::id()));
+        let store = Store::load(&path).unwrap();
+        let chat = ChatId(-100);
+        let person = |id| Participant { id: UserId(id), name: format!("P{id}"), username: None };
+        let game = Game {
+            title: "Family".into(),
+            organizer: Some(person(1)),
+            participants: vec![person(1), person(2), person(3)],
+            assignments: Some(vec![(UserId(1), UserId(2)), (UserId(2), UserId(3)), (UserId(3), UserId(1))]),
+        };
+        store.start(chat, game).unwrap();
+        assert_eq!(store.matches_for(UserId(1)).len(), 1);
+
+        store.remove(chat);
+        assert!(store.matches_for(UserId(1)).is_empty());
+        assert!(Store::load(&path).unwrap().matches_for(UserId(1)).is_empty());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn matches_are_kept_per_group() {
+        let path = std::env::temp_dir().join(format!("santa_test_groups_{}.json", std::process::id()));
+        let store = Store::load(&path).unwrap();
+        let person = |id| Participant { id: UserId(id), name: format!("P{id}"), username: None };
+        let drawn = |title: &str, pairs: Vec<(u64, u64)>| Game {
+            title: title.into(),
+            organizer: Some(person(1)),
+            participants: (1..=4).map(person).collect(),
+            assignments: Some(pairs.into_iter().map(|(g, r)| (UserId(g), UserId(r))).collect()),
+        };
+        store.start(ChatId(-1), drawn("Family", vec![(1, 2), (2, 3), (3, 1)])).unwrap();
+        store.start(ChatId(-2), drawn("Work", vec![(1, 4), (4, 2), (2, 1)])).unwrap();
+
+        let in_family = store.read(ChatId(-1), |game| game.unwrap().match_for(UserId(1)).unwrap().id);
+        let in_work = store.read(ChatId(-2), |game| game.unwrap().match_for(UserId(1)).unwrap().id);
+        assert_eq!(in_family, UserId(2));
+        assert_eq!(in_work, UserId(4));
+        assert_eq!(store.matches_for(UserId(1)).len(), 2);
+
+        fs::remove_file(path).unwrap();
     }
 }

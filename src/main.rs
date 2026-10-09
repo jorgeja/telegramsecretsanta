@@ -356,18 +356,31 @@ async fn bot_membership_changed(update: ChatMemberUpdated, store: Arc<Store>) ->
 
 async fn my_santa(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let Some(user) = &msg.from else { return Ok(()) };
-    let matches = store.matches_for(user.id);
 
-    let text = if matches.is_empty() {
-        "You don't have a Secret Santa match yet. Send /join in your group and wait for the draw!"
-            .to_string()
+    // In a group, only that group's match; in a private chat, every group's.
+    let matches = if msg.chat.is_private() {
+        store.matches_for(user.id)
     } else {
-        matches
-            .iter()
-            .map(|(title, receiver)| match_text(title, receiver))
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        store.read(msg.chat.id, |game| {
+            game.and_then(|g| Some((g.title.clone(), g.match_for(user.id)?.clone())))
+                .into_iter()
+                .collect()
+        })
     };
+    if matches.is_empty() {
+        let text = if msg.chat.is_private() {
+            "You don't have a Secret Santa match yet. Join one in your group and wait for the draw!"
+        } else {
+            "You don't have a Secret Santa match in this group yet. Wait for the organiser to /draw names!"
+        };
+        return reply(bot, msg, text).await;
+    }
+
+    let text = matches
+        .iter()
+        .map(|(title, receiver)| match_text(title, receiver))
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
     // Never reveal a match in the group itself.
     let sent = bot.send_message(user.id, text).parse_mode(ParseMode::Html).await;
