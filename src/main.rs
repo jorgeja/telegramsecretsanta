@@ -88,19 +88,29 @@ async fn start(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResu
         return reply(bot, msg, "Only group admins can start a Secret Santa.").await;
     }
 
+    // The organiser takes part too, so they're the first participant.
     let organizer = Participant::from_user(user);
+    let title = group_title(msg);
     let game = Game {
-        title: group_title(msg),
+        title: title.clone(),
         organizer: Some(organizer.clone()),
-        participants: Vec::new(),
+        participants: vec![organizer.clone()],
         assignments: None,
     };
     match store.start(msg.chat.id, game) {
         Ok(()) => {
-            let text = format!(
-                "🎅 {name} started a Secret Santa! Tap the button below to join. When everyone's in, {name} will /draw names.",
+            let mut text = format!(
+                "🎅 {name} started a Secret Santa and is the first to join! Tap the button below to join too. \
+                 When everyone's in, {name} will /draw names.",
                 name = organizer.display()
             );
+            let can_message = bot.send_message(user.id, joined_text(&title)).parse_mode(ParseMode::Html).await.is_ok();
+            if !can_message {
+                text.push_str(&format!(
+                    "\n\n{}, please tap the button as well so I can send you your match privately.",
+                    organizer.display()
+                ));
+            }
             reply_with_join_button(bot, msg, me, &text).await
         }
         Err(existing) => {

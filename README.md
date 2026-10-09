@@ -7,7 +7,8 @@ a gift for.
 ## How it works
 
 1. Add the bot to your group.
-2. A group admin sends `/start` in the group. They become the organiser for this round.
+2. A group admin sends `/start` in the group. They become the organiser and are automatically
+   the first participant.
 3. Everyone taps the **Join Secret Santa** button under the bot's message. It opens a private
    chat with the bot, and pressing **Start** there joins them. Telegram only lets bots message
    people who have started a chat with them, so this one tap covers both.
