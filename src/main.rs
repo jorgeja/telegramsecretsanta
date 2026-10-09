@@ -91,7 +91,7 @@ async fn start(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResu
     let organizer = Participant::from_user(user);
     let game = Game {
         title: group_title(msg),
-        organizer: organizer.clone(),
+        organizer: Some(organizer.clone()),
         participants: Vec::new(),
         assignments: None,
     };
@@ -105,8 +105,8 @@ async fn start(bot: &Bot, msg: &Message, me: &Me, store: &Store) -> ResponseResu
         }
         Err(existing) => {
             let text = format!(
-                "A Secret Santa is already running here, organised by {}. An admin can /reset it to start over.",
-                existing.display()
+                "A Secret Santa is already running here.{} An admin can /reset it to start over.",
+                existing.map(|o| format!(" It's organised by {}.", o.display())).unwrap_or_default()
             );
             reply(bot, msg, &text).await
         }
@@ -225,8 +225,8 @@ async fn list(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let text = store.read(msg.chat.id, |game| match game {
         None => NOT_STARTED.to_string(),
         Some(game) if game.participants.is_empty() => format!(
-            "🎅 Secret Santa organised by {}. Nobody has joined yet — send /join to take part!",
-            game.organizer.display()
+            "🎅 Nobody has joined the Secret Santa yet — send /join to take part!{}",
+            organised_by(game)
         ),
         Some(game) => {
             let names: Vec<String> = game.participants.iter().map(|p| format!("• {}", p.display())).collect();
@@ -236,9 +236,9 @@ async fn list(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
                 "Registration is open — use /join to join in."
             };
             format!(
-                "🎅 <b>Secret Santa participants ({})</b>\nOrganised by {}\n\n{}\n\n{status}",
+                "🎅 <b>Secret Santa participants ({})</b>{}\n\n{}\n\n{status}",
                 names.len(),
-                game.organizer.display(),
+                organised_by(game),
                 names.join("\n")
             )
         }
@@ -246,12 +246,21 @@ async fn list(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     reply(bot, msg, &text).await
 }
 
+fn organised_by(game: &Game) -> String {
+    match &game.organizer {
+        Some(organizer) => format!("\nOrganised by {}", organizer.display()),
+        None => String::new(),
+    }
+}
+
 async fn draw(bot: &Bot, msg: &Message, store: &Store) -> ResponseResult<()> {
     let Some(user) = &msg.from else { return Ok(()) };
     let Some(organizer) = store.read(msg.chat.id, |game| game.map(|g| g.organizer.clone())) else {
         return reply(bot, msg, NOT_STARTED).await;
     };
-    if organizer.id != user.id {
+    if let Some(organizer) = organizer
+        && organizer.id != user.id
+    {
         let text = format!(
             "Only {}, who started this Secret Santa, can draw names.",
             organizer.display()

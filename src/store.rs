@@ -40,8 +40,10 @@ impl Participant {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Game {
     pub title: String,
-    /// The admin who ran /start; only they can draw names.
-    pub organizer: Participant,
+    /// The admin who ran /start; only they can draw names. Rounds saved before organisers
+    /// existed have none, and any admin can draw those.
+    #[serde(default)]
+    pub organizer: Option<Participant>,
     pub participants: Vec<Participant>,
     /// `(giver, receiver)` pairs, set once names have been drawn.
     pub assignments: Option<Vec<(UserId, UserId)>>,
@@ -95,8 +97,8 @@ impl Store {
     }
 
     /// Starts `game` in `chat`, unless one is already running there, in which case that
-    /// game's organiser is returned.
-    pub fn start(&self, chat: ChatId, game: Game) -> Result<(), Participant> {
+    /// game's organiser (if it has one) is returned.
+    pub fn start(&self, chat: ChatId, game: Game) -> Result<(), Option<Participant>> {
         let mut games = self.games.lock().unwrap();
         if let Some(existing) = games.get(&chat.0) {
             return Err(existing.organizer.clone());
@@ -135,4 +137,25 @@ fn write_atomically(path: &Path, games: &HashMap<i64, Game>) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(games)?)?;
     fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_rounds_saved_before_organisers_existed() {
+        let old_state = r#"{
+            "-1001234567890": {
+                "title": "Family",
+                "participants": [{ "id": 42, "name": "Jane Doe", "username": "jane" }],
+                "assignments": null
+            }
+        }"#;
+        let games: HashMap<i64, Game> = serde_json::from_str(old_state).unwrap();
+
+        let game = &games[&-1001234567890];
+        assert!(game.organizer.is_none());
+        assert!(game.is_registered(UserId(42)));
+    }
 }
