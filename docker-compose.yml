@@ -1,6 +1,8 @@
 services:
-  secret-santa:
+  secret_santa_bot:
     build: .
+    image: secret_santa_bot
+    container_name: secret_santa_bot
     restart: unless-stopped
     env_file: .env
     volumes:
