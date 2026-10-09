@@ -1,0 +1,5 @@
+target
+.git
+.env
+santa_state.json
+santa_state.tmp

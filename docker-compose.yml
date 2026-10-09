@@ -1,0 +1,10 @@
+services:
+  secret-santa:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - santa-data:/data
+
+volumes:
+  santa-data:
